@@ -144,6 +144,38 @@ install(TARGETS appUltraCAN
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
+# --- Linux desktop integration ------------------------------------------------
+# What makes the installed binary an APPLICATION rather than a file in
+# /usr/bin: the launcher entry, and the icon that entry names.
+#
+# UNIX AND NOT APPLE, not UNIX: macOS carries its launcher metadata inside the
+# .app bundle (MACOSX_BUNDLE above), and an XDG entry there is dead weight.
+#
+# The two destinations are not interchangeable and neither is optional:
+#   - applications/ultracan.desktop is what the menu reads. Its base name must
+#     match the string main.cpp passes to setDesktopFileName(), or a Wayland
+#     compositor cannot tie a running window back to this entry.
+#   - the icon is installed under the NAME the entry's Icon= key asks for -
+#     "ultracan" - which is why it is RENAMEd. Icon= is a theme LOOKUP key, not
+#     a path: an icon left as ultracan_logo_256.png is simply never found, and
+#     the entry falls back to a blank generic glyph with no warning anywhere.
+#
+# hicolor is the fallback theme every icon theme inherits from, so one entry
+# there works under GNOME, KDE, XFCE and the rest.
+if(UNIX AND NOT APPLE)
+    # The .desktop file lives at the REPOSITORY root, one level above this
+    # CMake source directory - move it next to CMakeLists.txt and this path
+    # becomes a plain ${CMAKE_CURRENT_SOURCE_DIR}/ultracan.desktop.
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../ultracan.desktop
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/applications
+    )
+
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/assets/icons/ultracan_logo_256.png
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/256x256/apps
+        RENAME ultracan.png
+    )
+endif()
+
 # =============================================================================
 #                       WINDOWS DEPLOYMENT AND INSTALLER
 # =============================================================================

@@ -33,6 +33,27 @@ int main(int argc, char *argv[])
     QCoreApplication::setApplicationName(QStringLiteral("UltraCAN"));
     QCoreApplication::setApplicationVersion(QStringLiteral(APP_VERSION));
 
+#if defined(Q_OS_LINUX)
+    /*!
+        Ties the running process to ultracan.desktop.
+
+        This is the Linux counterpart of the .rc icon resource below: the
+        QIcon set by setWindowIcon() covers windows the process draws itself,
+        but the icon a Wayland compositor puts in the dock, in the Alt+Tab
+        switcher and in GNOME's window list comes from the desktop ENTRY it
+        matches the surface to - and the match is made on the app_id, which is
+        exactly this string. Without it the window arrives as a generic
+        surface and shows the fallback icon no matter how good the installed
+        artwork is.
+
+        The argument is the entry's base name with no ".desktop" suffix, and
+        it must equal the installed file name (see the install() rules in
+        CMakeLists.txt). X11 sessions match on WM_CLASS instead, which Qt
+        derives from argv[0] - hence StartupWMClass=UltraCAN in the entry.
+    */
+    QGuiApplication::setDesktopFileName(QStringLiteral("ultracan"));
+#endif
+
     /*!
         The RUNTIME icon: Alt+Tab, the taskbar button of a running instance, and
         any native window this process opens.

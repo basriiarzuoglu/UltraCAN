@@ -43,12 +43,30 @@ public:
     explicit CanDevice(std::function<qint64()> clock, QObject *parent = nullptr);
     ~CanDevice() override;
 
-    /*! Plugins Qt actually has available in this build ("socketcan", "peakcan", ...). */
+    /*!
+        Plugins Qt actually has available in this build ("socketcan", "peakcan", ...).
+        On Linux socketcan is moved to the FRONT of the list - see the note in
+        the implementation for why it is reordered rather than inserted.
+    */
     static QStringList availablePlugins();
-    /*! Interface names a plugin currently offers ("can0", "usbcan0", ...). */
+    /*!
+        Interface names a plugin currently offers ("can0", "vcan0", "usbcan0").
+        For socketcan this falls back to the kernel's own list of CAN network
+        devices when the plugin enumerates nothing.
+    */
     static QStringList availableInterfaces(const QString &plugin);
     /*! socketcan on Linux, peakcan on Windows, virtualcan as the fallback. */
     static QString preferredPlugin();
+
+    /*!
+        Whether \a plugin is SocketCAN - the Linux kernel's own CAN stack.
+
+        It is the one backend that is configured OUTSIDE the application: the
+        interface is brought up and given its bitrate with \c ip(8), so several
+        rules in open() and in the status text differ for it. Case-insensitive,
+        because the name arrives from a combo box and from settings.
+    */
+    static bool isSocketCan(const QString &plugin);
 
     /*!
         Cleans a string that came out of a vendor driver.

@@ -4,8 +4,61 @@
 #include <QCanBusDeviceInfo>
 #include <QDebug>
 #include <QVariant>   // setConfigurationParameter() takes a QVariant
+#include <QtGlobal>   // Q_OS_LINUX / Q_OS_WIN
+
+#if defined(Q_OS_LINUX)
+#  include <QDir>
+#  include <QFile>
+#endif
 
 #include <utility>
+
+namespace {
+
+#if defined(Q_OS_LINUX)
+
+/*! ARPHRD_CAN, from <linux/if_arp.h>. The kernel writes it into
+    /sys/class/net/<iface>/type for every CAN network device. */
+constexpr int kArphrdCan = 280;
+
+/*!
+    The kernel's own list of CAN interfaces, read straight from sysfs.
+
+    This is the FALLBACK for socketcan, used only when QCanBus enumerates
+    nothing. Qt's socketcan backend walks if_nameindex() and applies the same
+    ARPHRD_CAN test, so in the normal case both lists agree and this code never
+    runs; it earns its place when the backend's enumeration path is the thing
+    that failed (a SerialBus build without libsocketcan, a container where the
+    netlink query is refused) and the interface is nevertheless openable.
+
+    vcan and slcan devices report ARPHRD_CAN as well, which is deliberate: a
+    vcan0 from `modprobe vcan` must appear exactly like real hardware, because
+    for everything above this layer it behaves like it.
+*/
+QStringList socketCanInterfacesFromSysfs()
+{
+    const QDir sysClassNet(QStringLiteral("/sys/class/net"));
+    QStringList names;
+
+    // The entries are symlinks INTO /sys/devices; QDir::Dirs follows them.
+    const QStringList entries =
+            sysClassNet.entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::System);
+    for (const QString &name : entries) {
+        QFile type(sysClassNet.filePath(name) + QStringLiteral("/type"));
+        if (!type.open(QIODevice::ReadOnly | QIODevice::Text))
+            continue;                    // lo, a device disappearing mid-scan
+        bool ok = false;
+        if (type.readAll().trimmed().toInt(&ok) == kArphrdCan && ok)
+            names.append(name);
+    }
+
+    names.sort();                        // can0, can1, vcan0 - stable ordering
+    return names;
+}
+
+#endif // Q_OS_LINUX
+
+} // namespace
 
 CanDevice::CanDevice(std::function<qint64()> clock, QObject *parent)
     : QObject(parent)
@@ -20,11 +73,47 @@ CanDevice::~CanDevice()
 
 // ------------------------------------------------------------- enumeration
 
+bool CanDevice::isSocketCan(const QString &plugin)
+{
+    return plugin.compare(QLatin1String("socketcan"), Qt::CaseInsensitive) == 0;
+}
+
 QStringList CanDevice::availablePlugins()
 {
     if (!QCanBus::instance())
         return {};
-    return QCanBus::instance()->plugins();
+
+    QStringList plugins = QCanBus::instance()->plugins();
+
+#if defined(Q_OS_LINUX)
+    // SocketCAN is the native transport here: can0 and vcan0 are kernel network
+    // devices, not vendor hardware behind a vendor DLL, so it is what a Linux
+    // user reaches for first and it belongs at the top of the picker. The
+    // connection panel selects entry 0 when nothing is remembered and nothing
+    // is preferred, so the order is not merely cosmetic.
+    //
+    // Deliberately a RE-ORDER and not an insert. A name QCanBus does not know
+    // is not a plugin this application can open - createDevice() would fail
+    // with "cannot find plugin" the moment somebody picked it - so fabricating
+    // the entry would trade an honest empty list for a dead menu item that
+    // fails at the worst possible moment. Qt's Linux SerialBus build always
+    // ships this plugin; its absence means the module was configured without
+    // it, which is worth saying out loud exactly once per process.
+    const qsizetype socketcan = plugins.indexOf(QLatin1String("socketcan"));
+    if (socketcan > 0) {
+        plugins.move(socketcan, 0);
+    } else if (socketcan < 0) {
+        static bool warned = false;      // GUI thread only; see the class docs
+        if (!warned) {
+            warned = true;
+            qWarning("This Qt SerialBus build ships no socketcan plugin, so "
+                     "can0/vcan0 cannot be opened. Available plugins: %s",
+                     plugins.isEmpty() ? "(none)" : qPrintable(plugins.join(QStringLiteral(", "))));
+        }
+    }
+#endif
+
+    return plugins;
 }
 
 QStringList CanDevice::availableInterfaces(const QString &plugin)
@@ -40,6 +129,23 @@ QStringList CanDevice::availableInterfaces(const QString &plugin)
     names.reserve(infos.size());
     for (const QCanBusDeviceInfo &info : infos)
         names.append(info.name());
+
+#if defined(Q_OS_LINUX)
+    // Ask the kernel directly when the backend came back empty-handed. An
+    // interface that exists in /sys/class/net can be opened by name even if
+    // the plugin's own enumeration failed, and the panel disables Connect
+    // while the list is empty - so without this a perfectly usable can0 is
+    // simply unreachable from the UI.
+    if (names.isEmpty() && isSocketCan(plugin)) {
+        names = socketCanInterfacesFromSysfs();
+        if (!names.isEmpty()) {
+            qInfo("socketcan: the plugin enumerated nothing (%s); using the "
+                  "kernel's own list instead: %s",
+                  errorMessage.isEmpty() ? "no reason given" : qPrintable(sanitize(errorMessage)),
+                  qPrintable(names.join(QStringLiteral(", "))));
+        }
+    }
+#endif
 
     // Several plugins (virtualcan among them) enumerate nothing but still
     // accept the conventional interface names.
@@ -113,10 +219,43 @@ void CanDevice::open(const QString &plugin, const QString &interfaceName, int bi
         return;
     }
 
-    // Not every plugin honours BitRateKey (socketcan takes it from `ip link`,
-    // virtualcan ignores it). Setting it is harmless where unsupported.
-    if (bitrate > 0)
+    // --- plugin-specific configuration ---------------------------------------
+    if (isSocketCan(plugin)) {
+        // A SocketCAN interface is configured OUTSIDE this application: the
+        // bitrate belongs to the kernel's netlink configuration, set once with
+        //     sudo ip link set can0 type can bitrate 500000
+        //     sudo ip link set up can0
+        // and the socket the plugin opens inherits it.
+        //
+        // BitRateKey is therefore not merely ignored here - it is REFUSED. Qt's
+        // socketcan backend only implements the key when SerialBus was built
+        // against libsocketcan; everywhere else it falls through to the
+        // backend's default branch, which raises a ConfigurationError. That
+        // error reaches the connection panel as a red "no such configuration"
+        // line sitting underneath a bus that connected perfectly well. Skip the
+        // key and tell the user the command that actually changes the rate.
+        if (bitrate > 0) {
+            qInfo("socketcan: %s runs at the bitrate the kernel gave it; the "
+                  "%d bit/s selected here is not applied. To change it: "
+                  "sudo ip link set %s down && sudo ip link set %s type can "
+                  "bitrate %d && sudo ip link set %s up",
+                  qPrintable(interfaceName), bitrate, qPrintable(interfaceName),
+                  qPrintable(interfaceName), bitrate, qPrintable(interfaceName));
+        }
+
+        // Error frames reach a SocketCAN socket only if the socket asked for
+        // them - the kernel's default error mask is empty. Without this the
+        // error-frame counter reads 0 on a bus that is error-passive or
+        // bus-off, which is precisely when it is worth reading. Other plugins
+        // deliver error frames unconditionally, so this is socketcan-only.
+        m_device->setConfigurationParameter(
+                QCanBusDevice::ErrorFilterKey,
+                QVariant::fromValue(QCanBusFrame::FrameErrors(QCanBusFrame::AnyError)));
+    } else if (bitrate > 0) {
+        // Not every remaining plugin honours BitRateKey either (virtualcan
+        // ignores it), but they accept it silently.
         m_device->setConfigurationParameter(QCanBusDevice::BitRateKey, QVariant(bitrate));
+    }
 
     connect(m_device, &QCanBusDevice::framesReceived,
             this, &CanDevice::handleFramesReceived);
@@ -135,8 +274,25 @@ void CanDevice::open(const QString &plugin, const QString &interfaceName, int bi
     m_hardwareEpochValid = false;
 
     if (!m_device->connectDevice()) {
-        emit errorText(tr("Cannot connect %1/%2: %3")
-                       .arg(plugin, interfaceName, sanitize(m_device->errorString())));
+        QString message = tr("Cannot connect %1/%2: %3")
+                          .arg(plugin, interfaceName, sanitize(m_device->errorString()));
+
+        // The overwhelmingly common SocketCAN failure is an interface that
+        // exists but has never been brought up, and the kernel's own wording
+        // for it ("Network is down") tells the user nothing about the two
+        // commands that fix it. Say them.
+        if (isSocketCan(plugin)) {
+            message += QLatin1Char(' ');
+            message += interfaceName.startsWith(QLatin1String("vcan"))
+                       ? tr("Run: sudo modprobe vcan; sudo ip link add dev %1 "
+                            "type vcan; sudo ip link set up %1")
+                         .arg(interfaceName)
+                       : tr("Run: sudo ip link set %1 type can bitrate %2; "
+                            "sudo ip link set up %1")
+                         .arg(interfaceName).arg(bitrate > 0 ? bitrate : 500000);
+        }
+
+        emit errorText(message);
         teardown();
         emit stateChanged(int(QCanBusDevice::UnconnectedState));
     }

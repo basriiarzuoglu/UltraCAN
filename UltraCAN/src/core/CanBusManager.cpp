@@ -283,6 +283,14 @@ QString CanBusManager::busStatusText() const
     case Connecting:
         return tr("Connecting to %1...").arg(m_interfaceName);
     case Connected:
+        // SocketCAN gets no rate in the label. The combo box value was never
+        // sent to the driver there - the kernel owns the bitrate, set with
+        // `ip link` - so printing it would state a number that is simply not
+        // what the bus is running at whenever the two disagree. See the
+        // socketcan branch in CanDevice::open().
+        if (CanDevice::isSocketCan(m_pluginName))
+            return tr("Connected (%1 / %2, kernel bitrate)")
+                   .arg(m_pluginName, m_interfaceName);
         return tr("Connected (%1 / %2 @ %3 kbit/s)")
                .arg(m_pluginName, m_interfaceName)
                .arg(m_bitrate / 1000);

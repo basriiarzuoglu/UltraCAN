@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=UltraCAN
+GenericName=CAN Bus Analyzer
+Comment=Trace, decode, plot and replay CAN bus traffic
+Exec=UltraCAN
+Icon=ultracan
+Terminal=false
+Categories=Development;Engineering;
+Keywords=CAN;CANbus;SocketCAN;DBC;UDS;ISO-TP;automotive;trace;analyzer;
+StartupNotify=true
+StartupWMClass=UltraCAN
