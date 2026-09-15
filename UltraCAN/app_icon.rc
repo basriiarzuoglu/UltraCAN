@@ -1,0 +1,24 @@
+// Windows executable icon.
+//
+// Compiled INTO the binary by windres (MinGW) or rc.exe (MSVC). This is what
+// Explorer, a desktop shortcut and a PINNED taskbar button read.
+// QApplication::setWindowIcon() in main.cpp is a DIFFERENT mechanism that
+// only dresses the windows the running process creates - neither substitutes
+// for the other, so both are needed.
+//
+// The id matters: Windows shows the icon with the LOWEST resource id as the
+// file's icon, so this stays 1.
+//
+// Forward slashes on purpose - windres and rc.exe both accept them, and a
+// literal backslash here would have to be escaped.
+//
+// KEEP THIS FILE TRACKED. The stock Qt .gitignore in this directory carries a
+// blanket `*.rc` rule, which is meant for the GENERATED resource scripts
+// qmake used to emit (`*_resource.rc`, ignored on the line above it). This one
+// is hand-written source. When it went untracked, a fresh clone had no
+// app_icon.rc and CMake failed at CONFIGURE time with
+//   Cannot find source file: .../app_icon.rc
+// because qt_add_executable() names it. .gitignore now carries an explicit
+// `!app_icon.rc` negation to stop that happening again.
+
+1 ICON "assets/icons/ultracan_logo.ico"

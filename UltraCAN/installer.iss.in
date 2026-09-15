@@ -1,0 +1,109 @@
+; ============================================================================
+;  UltraCAN - Inno Setup script
+;
+;  TEMPLATE. Do not edit the copy in the build directory - CMake regenerates
+;  installer.iss from installer.iss.in on every configure, so edits there are
+;  lost without warning. Edit this file.
+;
+;  Placeholders of the form at-NAME-at are substituted by configure_file with
+;  @ONLY. Writing one in a comment leaves it in the output verbatim, which is
+;  harmless here but shows up as an unsubstituted placeholder to any checker.
+;  Build it with the CreateInstaller target; see the bottom of CMakeLists.txt.
+; ============================================================================
+
+#define MyAppName        "UltraCAN"
+#define MyAppVersion     "@PROJECT_VERSION@"
+#define MyAppPublisher   "Basri Arzuoglu"
+; Must track OUTPUT_NAME in CMakeLists.txt. The Start-menu and desktop
+; shortcuts point at this name, so a stale value installs shortcuts to a
+; file that is not there - which only shows up after installing.
+#define MyAppExeName     "UltraCAN.exe"
+; Everything that ships, staged by the Deploy target. This directory holds the
+; application and nothing else - see the long comment in CMakeLists.txt for why
+; it is not the build directory.
+#define DeployDir        "@ULTRACAN_DEPLOY_DIR_NATIVE@"
+
+[Setup]
+; A FIXED GUID, generated once. Inno keys the uninstall entry and upgrade
+; detection on AppId: change it and the next release installs alongside this
+; one instead of over it, leaving two entries in Apps & features and two
+; copies on disk. Never regenerate this for an existing product.
+AppId={{3A2DCE83-AD68-43C0-A91D-AD0B0E37EB31}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppVerName={#MyAppName} {#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+VersionInfoVersion=@PROJECT_VERSION@.0
+
+DefaultDirName={autopf}\{#MyAppName}
+DefaultGroupName={#MyAppName}
+; {autopf} resolves against PrivilegesRequired: Program Files when elevated,
+; the user's local AppData when not. Left at the default (admin) because a bus
+; analyzer is a machine-wide tool, and a per-user install in AppData surprises
+; the next technician who logs in.
+PrivilegesRequired=admin
+DisableProgramGroupPage=yes
+
+; 64-bit MinGW build, so install into the real Program Files rather than the
+; x86 one. `x64` is the spelling every Inno 6.x accepts; 6.3 and newer prefer
+; `x64compatible` and warn about this one. Change it only once you know the
+; version on the build machine, or the script stops compiling on older Inno.
+ArchitecturesAllowed=x64
+ArchitecturesInstallIn64BitMode=x64
+
+OutputDir=@ULTRACAN_INSTALLER_OUTPUT_DIR_NATIVE@
+OutputBaseFilename={#MyAppName}_Setup
+SetupIconFile=@ULTRACAN_SETUP_ICON_NATIVE@
+; The same star the executable and the title bar use, so the installer, the
+; shortcut and the running app are recognisably one product.
+UninstallDisplayIcon={app}\{#MyAppExeName}
+UninstallDisplayName={#MyAppName} {#MyAppVersion}
+
+Compression=lzma2/max
+SolidCompression=yes
+WizardStyle=modern
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; \
+    GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "startmenuicon"; Description: "Create a Start Menu shortcut"; \
+    GroupDescription: "{cm:AdditionalIcons}"
+
+[Files]
+; One recursive rule for the whole staged folder. This is only safe BECAUSE
+; DeployDir contains nothing but the application - recursesubdirs over a build
+; directory would package CMakeFiles, object files and the QML module output
+; tree along with it.
+;
+; ignoreversion: Qt's DLLs carry version resources, and the default
+; "only overwrite if newer" rule then refuses to downgrade a file when the user
+; installs an older build over a newer one - producing a mix of two releases.
+Source: "{#DeployDir}\*"; DestDir: "{app}"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+; The shortcut is named for the product; the file on disk is still the CMake
+; target name. To make them match, set OUTPUT_NAME UltraCAN on the appUltraCAN
+; target - but that also changes what Qt Creator's Run button launches, so it
+; is a deliberate choice rather than a tidy-up.
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; \
+    Tasks: startmenuicon
+Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"; \
+    Tasks: startmenuicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; \
+    Tasks: desktopicon
+
+[Run]
+Filename: "{app}\{#MyAppExeName}"; \
+    Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; \
+    Flags: nowait postinstall skipifsilent
+
+[UninstallDelete]
+; The settings file lives in %APPDATA%\Basri Arzuoglu\UltraCAN and is deliberately LEFT
+; BEHIND: it holds the last bus configuration and the remembered .dbc path, and
+; an uninstall/reinstall cycle to fix a problem should not also wipe the
+; technician's setup. Uninstall removes only what the installer created.
+Type: dirifempty; Name: "{app}"
