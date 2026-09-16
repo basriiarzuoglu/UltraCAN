@@ -62,3 +62,4 @@ compile_commands.json
 UltraCAN_v*_Windows/
 UltraCAN_v*_Windows.zip
 *.zip
+*.deb
