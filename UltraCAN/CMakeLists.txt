@@ -151,10 +151,74 @@ set(CMAKE_INSTALL_DEFAULT_DIRECTORY_PERMISSIONS
     WORLD_READ WORLD_EXECUTE)                    # 0755
 
 include(GNUInstallDirs)
+
+# --- standalone layout: where a bundled build puts itself ---------------------
+# ULTRACAN_BUNDLE_QT makes the Linux package self-contained: the Qt libraries,
+# the Qt plugins and the QML modules travel INSIDE it, so the application runs
+# on a distribution whose own Qt is 6.2, or that has no Qt at all. It is the
+# Linux counterpart of the windeployqt step further down.
+#
+# Off means "link against the Qt the target system provides", which is the
+# right answer when packaging FOR a distribution rather than around one.
+option(ULTRACAN_BUNDLE_QT
+    "Ship Qt's libraries, plugins and QML modules inside the Linux package"
+    ON)
+
+if(UNIX AND NOT APPLE AND ULTRACAN_BUNDLE_QT)
+    # ------------------------------------------------------------------------
+    # WHY THE BINARY MOVES OUT OF /usr/bin
+    # ------------------------------------------------------------------------
+    # A bundled Qt cannot go anywhere the system linker already looks. Dropping
+    # libQt6Core.so.6 into /usr/lib (or the multiarch dir underneath it) does
+    # not give THIS application its own Qt - it replaces the Qt of every other
+    # application on the machine, including the desktop shell. The whole bundle
+    # therefore lives in one private directory that nothing else reads:
+    #
+    #   /usr/lib/ultracan/bin/UltraCAN     the real executable
+    #   /usr/lib/ultracan/bin/qt.conf      tells Qt where the rest is
+    #   /usr/lib/ultracan/lib/             libQt6*.so.6 and friends
+    #   /usr/lib/ultracan/plugins/         platforms/, imageformats/, ...
+    #   /usr/lib/ultracan/qml/             QtQuick/, QtCharts/, ...
+    #   /usr/bin/UltraCAN                  symlink into the above
+    #
+    # qt.conf is the reason the executable moves rather than staying in
+    # /usr/bin with an RPATH. Qt looks for qt.conf next to the running
+    # executable, so a bundled app in /usr/bin would have to ship
+    # /usr/bin/qt.conf - a file every OTHER Qt program in /usr/bin would then
+    # read as its own, sending them all to look for plugins in our private
+    # tree. It is a system-wide break, not an inconvenience.
+    #
+    # The symlink keeps `Exec=UltraCAN` in the desktop entry working: the
+    # loader resolves $ORIGIN against the REAL path of the executable (it reads
+    # /proc/self/exe, which follows symlinks), so the bundle is found whichever
+    # name started it.
+    set(ULTRACAN_PRIVATE_DIR "lib/ultracan")
+    set(ULTRACAN_RUNTIME_DESTINATION "${ULTRACAN_PRIVATE_DIR}/bin")
+    set(ULTRACAN_BUNDLING TRUE)
+else()
+    set(ULTRACAN_RUNTIME_DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    set(ULTRACAN_BUNDLING FALSE)
+endif()
+
+if(ULTRACAN_BUNDLING)
+    # The bundle's own libraries must win over anything the system offers, and
+    # $ORIGIN is what makes that independent of where the package is unpacked.
+    # Set on the target rather than through CMAKE_INSTALL_RPATH so it survives
+    # whatever qt_standard_project_setup() decided for the build tree.
+    #
+    # INSTALL_RPATH_USE_LINK_PATH stays OFF (its default): switching it on
+    # would append the BUILD machine's Qt directory to this list, and the
+    # packaged binary would then silently prefer a developer's ~/Qt over its
+    # own bundle on any machine that happened to have one.
+    set_target_properties(appUltraCAN PROPERTIES
+        INSTALL_RPATH "$ORIGIN/../lib"
+    )
+endif()
+
 install(TARGETS appUltraCAN
     BUNDLE DESTINATION .
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    RUNTIME DESTINATION ${ULTRACAN_RUNTIME_DESTINATION}
 )
 
 # --- Linux desktop integration ------------------------------------------------
@@ -197,6 +261,115 @@ if(UNIX AND NOT APPLE)
         DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/ultracan
         RENAME copyright
     )
+
+    # --- the Qt bundle ------------------------------------------------------
+    if(ULTRACAN_BUNDLING)
+        # qt_generate_deploy_QML_app_script, not qt_generate_deploy_app_script.
+        # The plain one deploys libraries and plugins only; this is a Qt Quick
+        # application, and its `import QtQuick`, `import QtCharts` and
+        # `import QtQuick.Dialogs` resolve against Qt's qml/ tree at RUNTIME
+        # even though this project's OWN QML is compiled into the binary. The
+        # non-QML variant produces a package that links fine and then dies on
+        # "module QtQuick is not installed".
+        qt_generate_deploy_qml_app_script(
+            TARGET appUltraCAN
+            OUTPUT_SCRIPT ULTRACAN_DEPLOY_SCRIPT
+            # The generated script hard-codes GENERATE_QT_CONF, which is what
+            # writes lib/ultracan/bin/qt.conf and points Qt at the private
+            # plugins/ and qml/ directories below.
+            NO_UNSUPPORTED_PLATFORM_ERROR
+        )
+
+        # These QT_DEPLOY_* variables are the documented way to redirect the
+        # deployment, and they have to be set HERE rather than in this file's
+        # scope: install(SCRIPT) runs the deploy script inside the generated
+        # cmake_install.cmake, which shares no variables with configure time.
+        # install(CODE) injects them into that same script scope, and every
+        # QT_DEPLOY_* default is guarded with if(NOT ...), so a value set first
+        # wins.
+        #
+        # Every one of them MUST be overridden. The defaults are relative to
+        # the install prefix - lib (i.e. the multiarch system library dir),
+        # plugins, qml - which under CPACK_PACKAGING_INSTALL_PREFIX=/usr means
+        # /usr/lib/x86_64-linux-gnu, /usr/plugins and /usr/qml. The first of
+        # those overwrites the distribution's Qt; the other two are not
+        # directories any Linux system has.
+        install(CODE "
+            set(QT_DEPLOY_BIN_DIR          \"${ULTRACAN_PRIVATE_DIR}/bin\")
+            set(QT_DEPLOY_LIB_DIR          \"${ULTRACAN_PRIVATE_DIR}/lib\")
+            set(QT_DEPLOY_PLUGINS_DIR      \"${ULTRACAN_PRIVATE_DIR}/plugins\")
+            set(QT_DEPLOY_QML_DIR          \"${ULTRACAN_PRIVATE_DIR}/qml\")
+            set(QT_DEPLOY_TRANSLATIONS_DIR \"${ULTRACAN_PRIVATE_DIR}/translations\")
+            # The deploy script copies with file(INSTALL), which creates its
+            # directories under the build machine's umask - 0775 on a typical
+            # developer account, which lintian rejects on every one of the
+            # hundreds of directories a Qt bundle contains. Same reasoning as
+            # the top-level setting; it has to be repeated because this is a
+            # different script scope.
+            set(CMAKE_INSTALL_DEFAULT_DIRECTORY_PERMISSIONS
+                OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                GROUP_READ GROUP_EXECUTE
+                WORLD_READ WORLD_EXECUTE)
+        ")
+        install(SCRIPT ${ULTRACAN_DEPLOY_SCRIPT})
+
+        # --- clean up after the deploy script ----------------------------------
+        # Two things the Qt deployment API leaves in a state Debian rejects.
+        # Shell tools rather than CMake loops: this whole branch is Linux-only,
+        # and `find -exec ... +` does in one process what file(GLOB_RECURSE) plus
+        # a foreach would do in thousands.
+        install(CODE "
+            set(_ultracan_bundle \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${ULTRACAN_PRIVATE_DIR}\")
+
+            # 1. STRIP. CPACK_STRIP_FILES cannot reach any of this: it works by
+            #    handing CMAKE_INSTALL_DO_STRIP to the install rules CMake
+            #    generates, and the Qt deploy script copies with a bare
+            #    file(INSTALL), which ignores it. Most Qt libraries arrive
+            #    already stripped; the ICU ones the Qt online installer ships do
+            #    not, and they are both the largest files in the bundle and
+            #    three lintian errors.
+            #
+            #    lib/ ONLY. The plugins under plugins/ and qml/ have just had
+            #    their RPATH rewritten by patchelf, and running strip across a
+            #    freshly patched ELF is a known way to corrupt one.
+            find_program(_ultracan_strip strip)
+            if(_ultracan_strip)
+                execute_process(
+                    COMMAND find \"\${_ultracan_bundle}/lib\" -type f -name \"*.so*\"
+                            -exec \"\${_ultracan_strip}\" --strip-unneeded {} +
+                    ERROR_QUIET
+                )
+            endif()
+
+            # 2. PERMISSIONS. file(INSTALL) keeps the source mode and the
+            #    generated files (qt.conf, and every .qm lconvert writes) are
+            #    created under the build machine's umask - 0664 and 0775 on a
+            #    typical developer account. Same determinism argument as
+            #    CMAKE_INSTALL_DEFAULT_DIRECTORY_PERMISSIONS at the top of this
+            #    file; it has to be redone here because these files were never
+            #    created by an install() rule.
+            execute_process(COMMAND find \"\${_ultracan_bundle}\" -type d -exec chmod 0755 {} +)
+            execute_process(COMMAND find \"\${_ultracan_bundle}\" -type f -exec chmod 0644 {} +)
+            execute_process(COMMAND chmod 0755 \"\${_ultracan_bundle}/bin/UltraCAN\")
+        ")
+
+        # /usr/bin/UltraCAN -> ../lib/ultracan/bin/UltraCAN
+        #
+        # install(DIRECTORY) with no source creates the directory through the
+        # normal install machinery, so it picks up the pinned 0755 above;
+        # file(MAKE_DIRECTORY) inside install(CODE) would take the umask again.
+        install(DIRECTORY DESTINATION ${CMAKE_INSTALL_BINDIR})
+        install(CODE "
+            set(_ultracan_link \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/UltraCAN\")
+            file(REMOVE \"\${_ultracan_link}\")
+            # RELATIVE target on purpose: an absolute one would point at the
+            # staging directory CPack builds the package in, not at where the
+            # package is eventually unpacked.
+            file(CREATE_LINK \"../${ULTRACAN_PRIVATE_DIR}/bin/UltraCAN\"
+                             \"\${_ultracan_link}\" SYMBOLIC)
+            message(STATUS \"Symlinking: \${_ultracan_link} -> ../${ULTRACAN_PRIVATE_DIR}/bin/UltraCAN\")
+        ")
+    endif()
 endif()
 
 # =============================================================================
@@ -495,55 +668,74 @@ ip(8), not from inside the application.")
     # kept correct through every dpkg change.
 
     # --- automatic shared-library dependencies -------------------------------
-    # Runs dpkg-shlibdeps over the installed binaries and turns each SONAME
-    # into the Debian package that ships it, so Depends: ends up listing
-    # libc6, libstdc++6, libqt6core6, libqt6serialbus6 and the rest without
-    # anyone maintaining that list by hand.
+    # Runs dpkg-shlibdeps over every ELF file in the staged package - the
+    # executable AND, in a bundled build, the Qt libraries and plugins that
+    # travel with it - and turns each SONAME into the Debian package that
+    # ships it. That is still exactly what a standalone build wants: Qt itself
+    # needs libxcb, fontconfig, freetype, glib and a dozen others that come
+    # from the distribution and must NOT be bundled, and this is what puts
+    # them in Depends: without anyone maintaining the list by hand.
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 
-    # Qt may not live in a system directory. dpkg-shlibdeps resolves each
-    # NEEDED entry against the linker search path FIRST, and a Qt that came
-    # from the online installer (~/Qt/6.8.3/gcc_64/lib) is not on it - the tool
-    # then fails outright with "couldn't find library libQt6Quick.so.6", taking
-    # the whole package build down. Handing it the directory with -l lets it
-    # find the file; whether it can then attribute it to a package is a
-    # separate question, answered by the check below.
-    if(DEFINED QT6_INSTALL_PREFIX AND DEFINED QT6_INSTALL_LIBS)
-        set(ULTRACAN_QT_LIB_DIR "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_LIBS}")
+    if(ULTRACAN_BUNDLING)
+        # Point the tool at the BUNDLED library directory, spelled relative to
+        # the package staging root because that is dpkg-shlibdeps' working
+        # directory when CPack runs it, and the absolute path does not exist
+        # until then.
+        #
+        # This resolves Qt's internal references (libQt6Quick.so.6 needing
+        # libQt6Core.so.6) to files inside this very package. dpkg-shlibdeps
+        # finds no owning package for them, --ignore-missing-info lets that
+        # pass, and NO dependency is emitted - which is correct: the package
+        # already ships them. Only the genuinely external libraries end up in
+        # Depends:.
+        set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS_PRIVATE_DIRS "usr/${ULTRACAN_PRIVATE_DIR}/lib")
     else()
-        get_target_property(_ultracan_qt_core_lib Qt6::Core LOCATION)
-        get_filename_component(ULTRACAN_QT_LIB_DIR "${_ultracan_qt_core_lib}" DIRECTORY)
-    endif()
-    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS_PRIVATE_DIRS "${ULTRACAN_QT_LIB_DIR}")
+        # Unbundled: Qt may still not live in a system directory.
+        # dpkg-shlibdeps resolves each NEEDED entry against the linker search
+        # path first, and a Qt from the online installer is not on it - the
+        # tool then fails outright with "cannot find library libQt6Quick.so.6"
+        # and takes the whole package build down. Handing it the directory
+        # with -l lets it find the file; whether it can then attribute that
+        # file to a package is a separate question, answered below.
+        if(DEFINED QT6_INSTALL_PREFIX AND DEFINED QT6_INSTALL_LIBS)
+            set(ULTRACAN_QT_LIB_DIR "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_LIBS}")
+        else()
+            get_target_property(_ultracan_qt_core_lib Qt6::Core LOCATION)
+            get_filename_component(ULTRACAN_QT_LIB_DIR "${_ultracan_qt_core_lib}" DIRECTORY)
+        endif()
+        set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS_PRIVATE_DIRS "${ULTRACAN_QT_LIB_DIR}")
 
-    # --- is this Qt packageable at all? --------------------------------------
-    # The honest limit of SHLIBDEPS: it can only name a dependency for a
-    # library that some INSTALLED dpkg package owns. Build against the Qt
-    # online installer and dpkg-shlibdeps finds the .so, finds no owner, warns
-    # "no dependency information found", and - because CPack passes
-    # --ignore-missing-info - carries on and emits a .deb whose Depends: names
-    # libc6 and libstdc++6 but not one Qt package. That .deb installs cleanly
-    # on a machine with no Qt at all and then dies at startup on a missing
-    # libQt6Quick.so.6, which is the worst possible way to find out.
-    #
-    # So say it at CONFIGURE time, where it is still cheap to act on.
-    find_program(ULTRACAN_DPKG_QUERY dpkg-query)
-    if(ULTRACAN_DPKG_QUERY AND EXISTS "${ULTRACAN_QT_LIB_DIR}/libQt6Core.so.6")
-        execute_process(
-            COMMAND "${ULTRACAN_DPKG_QUERY}" -S "${ULTRACAN_QT_LIB_DIR}/libQt6Core.so.6"
-            RESULT_VARIABLE ULTRACAN_QT_IS_PACKAGED
-            OUTPUT_QUIET ERROR_QUIET
-        )
-        if(NOT ULTRACAN_QT_IS_PACKAGED EQUAL 0)
-            message(WARNING
-                "Qt at ${ULTRACAN_QT_LIB_DIR} is not owned by any installed "
-                ".deb, so dpkg-shlibdeps cannot turn it into a Depends: entry. "
-                "The .deb will build, and will then install onto machines that "
-                "cannot run it. Either build against the distribution's Qt 6 "
-                "development packages, or state the runtime requirement "
-                "yourself with -DULTRACAN_DEB_EXTRA_DEPENDS=\"libqt6quick6 "
-                "(>= 6.8), libqt6serialbus6 (>= 6.8), ...\", or ship Qt inside "
-                "the package.")
+        # --- is this Qt packageable at all? ----------------------------------
+        # The honest limit of SHLIBDEPS: it can only name a dependency for a
+        # library that some INSTALLED dpkg package owns. Build against the Qt
+        # online installer with bundling off and dpkg-shlibdeps finds the .so,
+        # finds no owner, and - because CPack passes --ignore-missing-info -
+        # carries on and emits a .deb whose Depends: names libc6 and
+        # libstdc++6 but not one Qt package. That .deb installs cleanly on a
+        # machine with no Qt at all and then dies at startup on a missing
+        # libQt6Quick.so.6, which is the worst possible way to find out.
+        #
+        # Not a concern with ULTRACAN_BUNDLE_QT on, which is why this check
+        # lives in the else branch: there the package carries its own Qt.
+        find_program(ULTRACAN_DPKG_QUERY dpkg-query)
+        if(ULTRACAN_DPKG_QUERY AND EXISTS "${ULTRACAN_QT_LIB_DIR}/libQt6Core.so.6")
+            execute_process(
+                COMMAND "${ULTRACAN_DPKG_QUERY}" -S "${ULTRACAN_QT_LIB_DIR}/libQt6Core.so.6"
+                RESULT_VARIABLE ULTRACAN_QT_IS_PACKAGED
+                OUTPUT_QUIET ERROR_QUIET
+            )
+            if(NOT ULTRACAN_QT_IS_PACKAGED EQUAL 0)
+                message(WARNING
+                    "Qt at ${ULTRACAN_QT_LIB_DIR} is not owned by any installed "
+                    ".deb, so dpkg-shlibdeps cannot turn it into a Depends: "
+                    "entry. The .deb will build, and will then install onto "
+                    "machines that cannot run it. Either turn "
+                    "ULTRACAN_BUNDLE_QT back ON, or build against the "
+                    "distribution's Qt 6 development packages, or state the "
+                    "runtime requirement yourself with "
+                    "-DULTRACAN_DEB_EXTRA_DEPENDS=\"libqt6quick6 (>= 6.8), ...\".")
+            endif()
         endif()
     endif()
 
