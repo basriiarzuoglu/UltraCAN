@@ -137,6 +137,19 @@ set_target_properties(appUltraCAN PROPERTIES
     WIN32_EXECUTABLE TRUE
 )
 
+# Directories that install() creates on its way to a destination inherit the
+# BUILD MACHINE'S UMASK, which on most developer accounts is 002 - so the .deb
+# ships /usr, /usr/bin and /usr/share as 0775 and lintian rejects every one of
+# them (non-standard-dir-perm). Pinning the mode here makes the packaged tree
+# identical whatever umask the build ran under, which is the only way a package
+# built on a laptop and a package built in CI can be the same package.
+# Must be set BEFORE the install() rules below: it is read as they are
+# generated, not when CPack runs.
+set(CMAKE_INSTALL_DEFAULT_DIRECTORY_PERMISSIONS
+    OWNER_READ OWNER_WRITE OWNER_EXECUTE
+    GROUP_READ GROUP_EXECUTE
+    WORLD_READ WORLD_EXECUTE)                    # 0755
+
 include(GNUInstallDirs)
 install(TARGETS appUltraCAN
     BUNDLE DESTINATION .
@@ -173,6 +186,16 @@ if(UNIX AND NOT APPLE)
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/assets/icons/ultracan_logo_256.png
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/256x256/apps
         RENAME ultracan.png
+    )
+
+    # Debian policy 12.5: every package MUST ship
+    # /usr/share/doc/<package>/copyright. It is not advisory - lintian raises
+    # no-copyright-file as an ERROR and an archive will refuse the upload. The
+    # destination uses the DEBIAN package name (lowercase "ultracan"), not the
+    # CMake project name, because that is the directory dpkg looks in.
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../LICENSE
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/ultracan
+        RENAME copyright
     )
 endif()
 
@@ -378,4 +401,159 @@ if(WIN32)
             "Inno Setup (ISCC.exe) not found - CreateInstaller not defined. "
             "Install Inno Setup 6, or pass -DISCC_EXECUTABLE=<path>.")
     endif()
+endif()
+
+# =============================================================================
+#                        LINUX PACKAGING  (CPack -> .deb)
+# =============================================================================
+# THIS BLOCK MUST STAY LAST IN THIS FILE. include(CPack) snapshots every CPACK_*
+# variable at the moment it is called, so anything set after that line is
+# ignored - silently. The symptom is "my setting had no effect", never an error,
+# which is why the rule is written down rather than assumed.
+#
+# Windows keeps Inno Setup (the CreateInstaller target above); CPACK_GENERATOR
+# is a global, so setting it to DEB unconditionally would also hand `cpack` a
+# Debian generator on a Windows build host.
+if(UNIX AND NOT APPLE)
+
+    # --- where the package puts its files ------------------------------------
+    # CPack DEB builds its payload by replaying this project's install() rules
+    # under CPACK_PACKAGING_INSTALL_PREFIX - NOT under CMAKE_INSTALL_PREFIX.
+    # Left at CMake's /usr/local default it would produce a .deb that writes
+    # into /usr/local, which Debian policy reserves for the local administrator
+    # and which no distribution package may touch. /usr is the only correct
+    # answer for a packaged application.
+    set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+
+    set(CPACK_GENERATOR "DEB")
+
+    # --- identity ------------------------------------------------------------
+    # Debian package names are lowercase, digits, '+', '-' and '.' only. The
+    # CMake project is "UltraCAN"; the PACKAGE is "ultracan". They are allowed
+    # to differ and here they must: dpkg rejects the capitals outright.
+    # The installed BINARY keeps its OUTPUT_NAME UltraCAN, which is what
+    # Exec=UltraCAN in ultracan.desktop resolves to on $PATH.
+    set(CPACK_PACKAGE_NAME "ultracan")
+    set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+    set(CPACK_PACKAGE_VENDOR "Basri Arzuoglu")
+    set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/basriiarzuoglu/UltraCAN")
+
+    # Required by dpkg, and it must carry a mail address in RFC822 form.
+    # Without it CPack substitutes a placeholder that lintian flags.
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER
+        "Hasan Basri Arzuoglu <basri.arzuoglu@robeff.com>")
+
+    # --- description ---------------------------------------------------------
+    # Debian's Description field is one synopsis line followed by an indented
+    # extended description. CPack assembles exactly that: SUMMARY becomes the
+    # synopsis, and every line below is indented for us (blank lines become the
+    # " ." paragraph separator). So these lines are written FLUSH LEFT on
+    # purpose - a line that already starts with a space is treated as verbatim
+    # text and will not be reflowed by the package viewers.
+    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+        "CAN bus analyzer, trace logger and DBC signal plotter")
+    set(CPACK_DEBIAN_PACKAGE_DESCRIPTION
+"UltraCAN attaches to a CAN interface - SocketCAN can0/vcan0 on Linux - and
+shows what is actually on the bus: a live trace, a raw bit and byte heatmap
+for buses nobody has a database for, DBC-decoded signal plots, a transmit
+sender with cyclic frames, background log recording with replay, and a
+UDS/ISO-TP diagnostics tester.
+.
+The bitrate of a SocketCAN interface belongs to the kernel and is set with
+ip(8), not from inside the application.")
+
+    # --- archive metadata ----------------------------------------------------
+    # DEB-DEFAULT is what produces the conventional ultracan_1.0.0_amd64.deb
+    # rather than CPack's own ultracan-1.0.0-Linux.deb spelling, which some
+    # repository tooling will not parse.
+    set(CPACK_DEBIAN_FILE_NAME "DEB-DEFAULT")
+    set(CPACK_DEBIAN_PACKAGE_SECTION "electronics")
+    set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
+    # Architecture is left unset on purpose: CPack asks
+    # `dpkg --print-architecture`, so a cross build and an arm64 host both get
+    # the right answer without a second place to keep in sync.
+
+    # Everything a bus analyzer session wants next to it: candump, cansend and
+    # `ip link set can0 type can bitrate ...`. A Suggests, not a Depends - the
+    # application is perfectly usable without them.
+    set(CPACK_DEBIAN_PACKAGE_SUGGESTS "can-utils")
+
+    # Debian expects shipped binaries stripped; the debug info belongs in a
+    # separate -dbgsym package, not in the one users install.
+    set(CPACK_STRIP_FILES TRUE)
+
+    # Requested: force 0644/0755 on the control files rather than inheriting
+    # whatever umask the build ran under. A control file that arrives as 0600
+    # makes dpkg refuse the package on some systems.
+    set(CPACK_DEBIAN_PACKAGE_CONTROL_STRICT_PERMISSION ON)
+
+    # No postinst/postrm here on purpose. desktop-file-utils and
+    # hicolor-icon-theme both register dpkg TRIGGERS on /usr/share/applications
+    # and /usr/share/icons/hicolor, so the menu database and the icon cache are
+    # refreshed by dpkg itself the moment this package lands. Hand-written
+    # update-desktop-database calls would duplicate that and then have to be
+    # kept correct through every dpkg change.
+
+    # --- automatic shared-library dependencies -------------------------------
+    # Runs dpkg-shlibdeps over the installed binaries and turns each SONAME
+    # into the Debian package that ships it, so Depends: ends up listing
+    # libc6, libstdc++6, libqt6core6, libqt6serialbus6 and the rest without
+    # anyone maintaining that list by hand.
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+
+    # Qt may not live in a system directory. dpkg-shlibdeps resolves each
+    # NEEDED entry against the linker search path FIRST, and a Qt that came
+    # from the online installer (~/Qt/6.8.3/gcc_64/lib) is not on it - the tool
+    # then fails outright with "couldn't find library libQt6Quick.so.6", taking
+    # the whole package build down. Handing it the directory with -l lets it
+    # find the file; whether it can then attribute it to a package is a
+    # separate question, answered by the check below.
+    if(DEFINED QT6_INSTALL_PREFIX AND DEFINED QT6_INSTALL_LIBS)
+        set(ULTRACAN_QT_LIB_DIR "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_LIBS}")
+    else()
+        get_target_property(_ultracan_qt_core_lib Qt6::Core LOCATION)
+        get_filename_component(ULTRACAN_QT_LIB_DIR "${_ultracan_qt_core_lib}" DIRECTORY)
+    endif()
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS_PRIVATE_DIRS "${ULTRACAN_QT_LIB_DIR}")
+
+    # --- is this Qt packageable at all? --------------------------------------
+    # The honest limit of SHLIBDEPS: it can only name a dependency for a
+    # library that some INSTALLED dpkg package owns. Build against the Qt
+    # online installer and dpkg-shlibdeps finds the .so, finds no owner, warns
+    # "no dependency information found", and - because CPack passes
+    # --ignore-missing-info - carries on and emits a .deb whose Depends: names
+    # libc6 and libstdc++6 but not one Qt package. That .deb installs cleanly
+    # on a machine with no Qt at all and then dies at startup on a missing
+    # libQt6Quick.so.6, which is the worst possible way to find out.
+    #
+    # So say it at CONFIGURE time, where it is still cheap to act on.
+    find_program(ULTRACAN_DPKG_QUERY dpkg-query)
+    if(ULTRACAN_DPKG_QUERY AND EXISTS "${ULTRACAN_QT_LIB_DIR}/libQt6Core.so.6")
+        execute_process(
+            COMMAND "${ULTRACAN_DPKG_QUERY}" -S "${ULTRACAN_QT_LIB_DIR}/libQt6Core.so.6"
+            RESULT_VARIABLE ULTRACAN_QT_IS_PACKAGED
+            OUTPUT_QUIET ERROR_QUIET
+        )
+        if(NOT ULTRACAN_QT_IS_PACKAGED EQUAL 0)
+            message(WARNING
+                "Qt at ${ULTRACAN_QT_LIB_DIR} is not owned by any installed "
+                ".deb, so dpkg-shlibdeps cannot turn it into a Depends: entry. "
+                "The .deb will build, and will then install onto machines that "
+                "cannot run it. Either build against the distribution's Qt 6 "
+                "development packages, or state the runtime requirement "
+                "yourself with -DULTRACAN_DEB_EXTRA_DEPENDS=\"libqt6quick6 "
+                "(>= 6.8), libqt6serialbus6 (>= 6.8), ...\", or ship Qt inside "
+                "the package.")
+        endif()
+    endif()
+
+    # Hand-written Depends, merged with (not replaced by) whatever
+    # dpkg-shlibdeps works out - CPack appends its result to this variable.
+    set(ULTRACAN_DEB_EXTRA_DEPENDS "" CACHE STRING
+        "Extra Debian Depends: entries, appended to the dpkg-shlibdeps result")
+    if(ULTRACAN_DEB_EXTRA_DEPENDS)
+        set(CPACK_DEBIAN_PACKAGE_DEPENDS "${ULTRACAN_DEB_EXTRA_DEPENDS}")
+    endif()
+
+    include(CPack)
 endif()
